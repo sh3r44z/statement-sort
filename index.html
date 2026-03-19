@@ -293,10 +293,40 @@ function parseRows(rows){
   if(rows.length===0) return [];
   const keys=Object.keys(rows[0]);
 
-  // Find columns by fuzzy match
+  // Detect if FNB headerless format: cols are __EMPTY or numeric indexes
+  // FNB CSV: Date, Amount, Balance, Description (no headers)
+  const isHeaderless = keys.some(k=>k==="__EMPTY"||k==="__EMPTY_1"||/^[0-9]$/.test(k)||k==="0"||k==="1");
+
+  // Also check if first key looks like a date value (FNB puts date in col 0)
+  const firstVal = String(Object.values(rows[0])[0]||"");
+  const firstLooksLikeDate = /^\d{4}[\/\-]\d{2}[\/\-]\d{2}/.test(firstVal) || /^\d{1,2}[\/\-]\d{2}[\/\-]\d{4}/.test(firstVal);
+
+  if(isHeaderless || firstLooksLikeDate){
+    // FNB headerless: col0=date, col1=amount, col2=balance, col3=description
+    const txs=[];
+    rows.forEach((row,i)=>{
+      const vals=Object.values(row).map(v=>String(v||"").trim());
+      if(vals.length<3) return;
+      const dateRaw=vals[0];
+      const amtRaw =vals[1];
+      const desc   =vals[3]||vals[2]||"";
+      if(!dateRaw||!amtRaw) return;
+      const amtNum=parseFloat(amtRaw.replace(/[^0-9.-]/g,""));
+      if(isNaN(amtNum)||amtNum===0) return;
+      const isCredit=amtNum>0;
+      const amount=Math.abs(amtNum);
+      if(desc.length<2) return;
+      // Clean description: remove card number suffixes like 457896*4965  14 MAR
+      const cleanDesc=desc.replace(/\d{6}\*+\d{4}\s*\d{0,2}\s*[A-Z]{0,3}/g,"").replace(/\s{2,}/g," ").trim();
+      txs.push({id:txs.length, date:dateRaw, description:cleanDesc.substring(0,80), amount, isCredit, category:autoCat(cleanDesc)});
+    });
+    return txs;
+  }
+
+  // Standard format with headers — find columns by fuzzy match
   const find=(patterns)=>keys.find(k=>patterns.some(p=>k.toLowerCase().includes(p)))||null;
   const dateCol  = find(["date","datum"]);
-  const descCol  = find(["description","narrative","details","merchant","payee","transaction description","trans desc","reference"]);
+  const descCol  = find(["description","narrative","details","merchant","payee","trans desc","reference"]);
   const amtCol   = find(["amount","debit","credit","value","amt"]);
   const debitCol = find(["debit"]);
   const creditCol= find(["credit"]);
@@ -305,30 +335,21 @@ function parseRows(rows){
   rows.forEach((row,i)=>{
     const dateRaw = dateCol ? String(row[dateCol]||"") : "";
     const desc    = descCol ? String(row[descCol]||"").trim() : Object.values(row).find(v=>String(v).length>5)||"";
-    if(!desc || desc.length<2) return;
-
+    if(!desc||desc.length<2) return;
     let amount=0, isCredit=false;
-
-    if(debitCol && creditCol){
-      // Separate debit/credit columns (common in FNB CSV)
+    if(debitCol&&creditCol){
       const d=parseFloat(String(row[debitCol]||"0").replace(/[^0-9.-]/g,""))||0;
       const c=parseFloat(String(row[creditCol]||"0").replace(/[^0-9.-]/g,""))||0;
-      if(c>0){amount=c;isCredit=true;}
-      else{amount=d;isCredit=false;}
-    } else if(amtCol){
-      const raw=String(row[amtCol]||"0").replace(/[^0-9.-]/g,"");
-      amount=Math.abs(parseFloat(raw)||0);
-      // Negative = debit, positive = credit (or check description)
-      const rawFull=String(row[amtCol]||"");
-      isCredit = rawFull.includes("+") || autoCat(desc)==="Income";
+      if(c>0){amount=c;isCredit=true;}else{amount=d;isCredit=false;}
+    }else if(amtCol){
+      const raw=String(row[amtCol]||"0");
+      const num=parseFloat(raw.replace(/[^0-9.-]/g,""))||0;
+      amount=Math.abs(num);
+      isCredit=num>0||autoCat(desc)==="Income";
     }
-
     if(amount===0) return;
-
-    // Parse date
     let dateStr=dateRaw;
-    if(!dateStr || dateStr==="Invalid Date") dateStr="Row "+(i+1);
-
+    if(!dateStr||dateStr==="Invalid Date") dateStr="Row "+(i+1);
     txs.push({id:txs.length, date:dateStr, description:desc.substring(0,80), amount, isCredit, category:autoCat(desc)});
   });
   return txs;
